@@ -26,7 +26,7 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 # Create a folder for pending reviews and put its ID here
 PENDING_REVIEW_FOLDER_ID = os.getenv("PENDING_REVIEW_FOLDER_ID")
 MAX_VIDEO_DURATION_FOR_SINGLE_CLIP = 45  # Videos longer than this will be chunked
-MAX_SUCCESSFUL_CHUNKS_PER_VIDEO = 10 # Set the desired limit here
+MAX_SUCCESSFUL_CHUNKS_PER_VIDEO = 5 # Set the desired limit here
 MAX_CONSECUTIVE_FAILURES = 7
 OWNER_NAME = "sibi_krishnamoorthy"
 # Files and Folders
@@ -165,13 +165,13 @@ def main():
 
     # --- Level 1: Search & Metadata Filtering (Unchanged) ---
     print("\n--- Level 1: Searching YouTube & Filtering Metadata ---")
-    queries = ["swimming technique -edit -vlog", "diving form -compilation", "kayak roll tutorial -fail", "water polo highlights"]
+    queries = ["swimming sports -edit -vlog", "diving sports -compilation", "kayak roll sports -fail", "water polo sports","water dive sports"]
     bad_keywords = ['edit', 'vlog', 'cinematic', 'fire edit', 'compilation', 'fails', 'music video']
     
     # ... (This whole search and metadata filter block is identical to the previous version)
     candidate_ids = set()
     for query in queries:
-        request = youtube.search().list(q=query, part="id", type="video", maxResults=20).execute()
+        request = youtube.search().list(q=query, part="id", type="video", maxResults=120).execute()
         candidate_ids.update(item['id']['videoId'] for item in request.get('items', []))
     
     videos_to_process = []
@@ -205,12 +205,12 @@ def main():
                 # Download a single clip (full video or middle 30s)
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
                 output_template = os.path.join(TEMP_VIDEO_DIR, f'{video_id}.%(ext)s')
-                ydl_opts = {'format': 'bestvideo[height<=1080][ext=mp4]/bestvideo', 'outtmpl': output_template, 'quiet': True ,'postprocessors': [{
+                ydl_opts = {'format': 'bestvideo[height<=1080][vcodec~=avc][ext=mp4]/bestvideo[height<=1080][ext=mp4]/bestvideo', 'outtmpl': output_template, 'quiet': True ,'postprocessors': [{
                         'key': 'FFmpegVideoConvertor',
                         'preferedformat': 'mp4', # Ensures the output container is mp4
                     }],}
                 if duration > 30:
-                    start, end = max(0, int((duration/2)-15)), max(0, int((duration/2)-15))+30
+                    start, end = max(0, int((duration/2)-15)), max(0, int((duration/2)-15))+15
                     ydl_opts['download_ranges'] = yt_dlp.utils.download_range_func(None, [(start, end)])
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -239,17 +239,17 @@ def main():
             part_num = 1
 
             # ** NEW: Update the while loop condition **
-            while (current_pos + 30 <= content_end and 
+            while (current_pos + 15 <= content_end and 
                    successful_uploads < MAX_SUCCESSFUL_CHUNKS_PER_VIDEO and 
                    consecutive_failures < MAX_CONSECUTIVE_FAILURES):
                 
                 if was_chunk_processed(db_conn, video_id, part_num):
                     print(f"\n-- Skipping clip {part_num} (already processed in a previous run) --")
                     part_num += 1
-                    current_pos += 30
+                    current_pos += 15
                     continue # Move to the next iteration
                 start_time = current_pos
-                end_time = start_time + 30
+                end_time = start_time + 15
                 clip_filename = f"{video_id}_part_{part_num}"
                 print(f"\n-- Attempting clip {part_num} (Success: {successful_uploads}/{MAX_SUCCESSFUL_CHUNKS_PER_VIDEO} | Fails: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}) --")
 
@@ -257,7 +257,7 @@ def main():
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                     output_template = os.path.join(TEMP_VIDEO_DIR, f'{clip_filename}.%(ext)s')
                     ydl_opts = {
-                        'format': 'bestvideo[height<=1080][ext=mp4]/bestvideo',
+                        'format': 'bestvideo[height<=1080][vcodec~=avc][ext=mp4]/bestvideo[height<=1080][ext=mp4]/bestvideo',
                         'outtmpl': output_template, 'quiet': True,
                         'download_ranges': yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
                         'postprocessors': [{
@@ -288,7 +288,7 @@ def main():
                     consecutive_failures += 1 # Also count download errors as failures
                     log_chunk_status(db_conn, video_id, part_num, "DOWNLOAD_ERROR")
                 part_num += 1
-                current_pos += 30 # Move to the next 30-second segment
+                current_pos += 15 # Move to the next 30-second segment
             
              # ** NEW: Update parent status based on why the loop stopped **
             if successful_uploads >= MAX_SUCCESSFUL_CHUNKS_PER_VIDEO or current_pos + 30 > content_end:
