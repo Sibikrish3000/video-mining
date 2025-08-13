@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 import os
 # Import our custom quality check functions
 import quality_checks
+import subprocess 
+
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,49 +39,114 @@ DB_FILE = "crawled_videos.db"
 TEMP_VIDEO_DIR = "temp_videos"
 SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/drive.file']
 
+COMPRESSION_THRESHOLD_MB = 10
+FILE_SIZE_THRESHOLD = COMPRESSION_THRESHOLD_MB * 1024 * 1024
 
+# CRF (Constant Rate Factor) for H.264. 23 is good, 28 is smaller.
+COMPRESSION_CRF = 28
+
+# `fast` or `medium`. Faster preset = slightly larger file.
+COMPRESSION_PRESET = 'fast'
+
+
+
+# --- NEW COMPRESSION HELPER FUNCTION ---
+def compress_video_if_needed(video_path: Path) -> Path:
+    """
+    Checks video file size and compresses it using FFmpeg if it exceeds the threshold.
+    Returns the path to the final video file (original or compressed).
+    """
+    try:
+        file_size = video_path.stat().st_size
+        if file_size <= FILE_SIZE_THRESHOLD:
+            # print(f"  [Compress] Size ({file_size / 1024**2:.2f}MB) is under threshold. Skipping.")
+            return video_path
+
+        print(f"  [Compress] Size ({file_size / 1024**2:.2f}MB) exceeds {COMPRESSION_THRESHOLD_MB}MB. Compressing...")
+        
+        # Define a temporary path for the compressed output
+        output_path = video_path.with_name(f"{video_path.stem}_compressed.mp4")
+
+        # Construct the FFmpeg command
+        command = [
+            'ffmpeg',
+            '-i', str(video_path),       # Input file
+            '-vcodec', 'libx264',        # Use the standard H.264 codec
+            '-preset', COMPRESSION_PRESET, # Balance speed and compression
+            '-crf', str(COMPRESSION_CRF),  # Set the quality/compression level
+            '-y',                        # Overwrite output file if it exists
+            str(output_path)
+        ]
+
+        # Run the command silently
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+        if result.returncode != 0:
+            print(f"  [Compress FAIL] FFmpeg failed. Using original file. Error: {result.stderr}")
+            return video_path # Fallback to the original file if compression fails
+
+        compressed_size = output_path.stat().st_size
+        if compressed_size >= file_size:
+            print(f"  [Compress] Compression didn't reduce file size. Using original.")
+            output_path.unlink() # Clean up the new file
+            return video_path
+
+        print(f"  [Compress SUCCESS] New size: {compressed_size / 1024**2:.2f}MB.")
+        
+        # Replace the original file with the new compressed one
+        original_path_str = str(video_path)
+        video_path.unlink()  # Delete the large original
+        output_path.rename(original_path_str) # Rename the smaller file to the original's name
+        
+        return Path(original_path_str)
+
+    except Exception as e:
+        print(f"  [Compress ERROR] An exception occurred: {e}")
+        return video_path # Always return the original path on error
 
 def process_and_upload_clip(local_filepath: Path, db_conn, drive_service, video_id: str, part_num: int = 0):
     """
-    Runs QA checks on a local video file and uploads it to Drive if it passes.
-    Returns True on successful upload, False otherwise.
+    Compresses, runs QA checks, and uploads a local video file.
     """
-    print(f"\n--- Running QA on {local_filepath.name} ---")
-    
+    print(f"\n--- Processing {local_filepath.name} ---")
 
-    if not quality_checks.verify_video_file(str(local_filepath)):
+    # === NEW STEP 1: COMPRESS THE FILE IF NEEDED ===
+    processed_filepath = compress_video_if_needed(local_filepath)
+
+    # === STEP 2: RUN QA CHECKS ON THE FINAL FILE (original or compressed) ===
+    print(f"--- Running QA on {processed_filepath.name} ---")
+    if not quality_checks.verify_video_file(str(processed_filepath)):
         print(f"REJECTED CLIP: File is corrupted or unplayable.")
         return False
 
-    # === ADD THE NEW CHECK HERE ===
-    if not quality_checks.check_for_hardcoded_subtitles(str(local_filepath)):
-        # No need to add to DB here, the parent video will be marked as processed later
+    if not quality_checks.check_for_hardcoded_subtitles(str(processed_filepath)):
         print(f"REJECTED CLIP: Failed hardcoded subtitle check.")
         return False
-    # Level 2: Content AI Analysis
-    if not quality_checks.check_scene_cuts(str(local_filepath)):
+        
+    if not quality_checks.check_scene_cuts(str(processed_filepath)):
         print(f"REJECTED CLIP: Failed scene cut check.")
         return False
     
-    if not quality_checks.check_subject_clarity(str(local_filepath)):
+    if not quality_checks.check_subject_clarity(str(processed_filepath), 
+                                                min_person_area=QA_MIN_PERSON_AREA,
+                                                debug_save=DEBUG_SAVE_FAILED_FRAMES,
+                                                debug_dir=DEBUG_FRAME_DIR):
         print(f"REJECTED CLIP: Failed subject clarity check.")
         return False
 
-    # Level 3: Upload for Human Review
-    print(f"PASSED all checks. Uploading {local_filepath.name} for human review...")
+    # === STEP 3: UPLOAD THE FINAL FILE ===
+    print(f"PASSED all checks. Uploading {processed_filepath.name} for human review...")
     try:
         part_suffix = f"_part_{part_num}" if part_num > 0 else ""
-        file_metadata = {
-            'name': f"{video_id}{part_suffix}.mp4",
-            'parents': [PENDING_REVIEW_FOLDER_ID]
-        }
-        media = MediaFileUpload(local_filepath, mimetype='video/mp4')
+        file_metadata = { 'name': f"{video_id}{part_suffix}.mp4", 'parents': [PENDING_REVIEW_FOLDER_ID] }
+        media = MediaFileUpload(processed_filepath, mimetype='video/mp4') # Use the final file path
         drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         print("SUCCESS: Uploaded to Google Drive.")
         return True
     except Exception as e:
         print(f"ERROR: Failed to upload clip to Drive. Reason: {e}")
         return False
+
 # --- AUTHENTICATION & SERVICES ---
 def get_google_services():
     """Handles authentication and returns YouTube and Drive service objects."""
