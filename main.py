@@ -39,14 +39,6 @@ DB_FILE = "crawled_videos.db"
 TEMP_VIDEO_DIR = "temp_videos"
 SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/drive.file']
 
-COMPRESSION_THRESHOLD_MB = 10
-FILE_SIZE_THRESHOLD = COMPRESSION_THRESHOLD_MB * 1024 * 1024
-
-# CRF (Constant Rate Factor) for H.264. 23 is good, 28 is smaller.
-COMPRESSION_CRF = 28
-
-# `fast` or `medium`. Faster preset = slightly larger file.
-COMPRESSION_PRESET = 'fast'
 
 QA_MIN_PERSON_AREA=0.05
 
