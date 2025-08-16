@@ -47,7 +47,10 @@ QA_SUBTITLE_AREA_THRESHOLD = 0.03
 # If True, saves a snapshot of frames that fail the subtitle check for review.
 DEBUG_SAVE_FAILED_SUBTITLE_FRAMES = True
 DEBUG_FRAME_DIR = "debug_frames"
+# Change this value to 15, 30, or any other duration you need.
+TARGET_CLIP_DURATION_SECONDS = 30
 
+MAX_VIDEO_DURATION_FOR_SINGLE_CLIP = TARGET_CLIP_DURATION_SECONDS + 15 # Videos longer than this will be chunked
 TARGET_SIZE_MB = 5
 # A small buffer to ensure the final file is under the target size.
 TARGET_SIZE_BUFFER_MB = 4.8
@@ -248,7 +251,6 @@ def was_chunk_processed(conn, parent_video_id, part_num):
     cursor.execute("SELECT chunk_id FROM processed_chunks WHERE chunk_id = ?", (chunk_id,))
     return cursor.fetchone() is not None
 
-# --- MAIN WORKFLOW ---
 def main():
     print("--- Starting Pipeline ---")
     
@@ -261,15 +263,13 @@ def main():
     db_conn = setup_database()
     youtube, drive = get_google_services()
 
-    # --- Level 1: Search & Metadata Filtering (Unchanged) ---
     print("\n--- Level 1: Searching YouTube & Filtering Metadata ---")
     queries = ["how to use face wash correctly #shorts -review -skit","shampoo application demo #shorts -routine -vlog","lotion application step-by-step #shorts -GRWM","conditioner usage demonstration #shorts -tutorial","how to apply roll-on deodorant #shorts","toothpaste demonstration on brush #shorts","using a soap bar #shorts -asmr -cutting","hand wash proper technique #shorts"]
     bad_keywords = ["-skit", "-comedy", "-review", "-unboxing", "-ad"]
 
-    # ... (This whole search and metadata filter block is identical to the previous version)
     candidate_ids = set()
     for query in queries:
-        request = youtube.search().list(q=query, part="id", type="video", maxResults=120).execute()
+        request = youtube.search().list(q=query, part="id", type="video", maxResults=50).execute()
         candidate_ids.update(item['id']['videoId'] for item in request.get('items', []))
     
     videos_to_process = []
@@ -282,7 +282,6 @@ def main():
             tags = [tag.lower() for tag in details['snippet'].get('tags', [])]
             duration_iso = details['contentDetails']['duration']
             duration = isodate.parse_duration(duration_iso).total_seconds()
-
             if any(word in title for word in bad_keywords) or any(word in tag for tag in tags for word in bad_keywords):
                 update_parent_video_status(db_conn, video_id, "REJECTED_METADATA")
             else:
@@ -291,24 +290,25 @@ def main():
             print(f"Could not process {video_id}: {e}")
     print(f"Found {len(videos_to_process)} videos passing initial checks.")
     
-    # --- New Processing Loop ---
+    # --- Processing Loop with Refactored Duration Logic ---
     for video in videos_to_process:
         video_id = video['id']
         duration = video['duration']
         print(f"\n{'='*20}\nProcessing Video ID: {video_id} (Duration: {duration:.0f}s)")
         
-        # --- PATH A: Short Videos (<= MAX_VIDEO_DURATION_FOR_SINGLE_CLIP) ---
+        # --- PATH A: Short Videos ---
         if duration <= MAX_VIDEO_DURATION_FOR_SINGLE_CLIP:
             try:
-                # Download a single clip (full video or middle 30s)
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
                 output_template = os.path.join(TEMP_VIDEO_DIR, f'{video_id}.%(ext)s')
-                ydl_opts = {'format': 'bestvideo[height<=1080][vcodec~=avc][ext=mp4]/bestvideo[height<=1080][ext=mp4]/bestvideo', 'outtmpl': output_template, 'quiet': True ,'postprocessors': [{
-                        'key': 'FFmpegVideoConvertor',
-                        'preferedformat': 'mp4', # Ensures the output container is mp4
-                    }],}
-                if duration > 30:
-                    start, end = max(0, int((duration/2)-15)), max(0, int((duration/2)-15))+15
+                ydl_opts = {'format': 'bestvideo[height<=1080][vcodec~=avc][ext=mp4]/bestvideo[height<=1080][ext=mp4]/bestvideo', 'outtmpl': output_template, 'quiet': True ,'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]}
+                
+                # If the video is longer than our target, cut a clip from the middle.
+                if duration > TARGET_CLIP_DURATION_SECONDS:
+                    start_offset = TARGET_CLIP_DURATION_SECONDS / 2
+                    midpoint = duration / 2
+                    start = max(0, int(midpoint - start_offset))
+                    end = start + TARGET_CLIP_DURATION_SECONDS
                     ydl_opts['download_ranges'] = yt_dlp.utils.download_range_func(None, [(start, end)])
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -322,13 +322,11 @@ def main():
             except Exception as e:
                 print(f"REJECTED (Download/Process Error): {e}")
             finally:
-                # Mark as fully processed since it's a short video
                 update_parent_video_status(db_conn, video_id, "FULLY_PROCESSED")
+
         # --- PATH B: Long Videos (to be chunked) ---
         else:
             print(f"Identified long video. Attempting to extract up to {MAX_SUCCESSFUL_CHUNKS_PER_VIDEO} clips.")
-            # Define content window: ignore first 15% and last 15%
-            # ** NEW: Add a counter for successful uploads **
             successful_uploads = 0
             consecutive_failures = 0
             content_start = int(duration * 0.15)
@@ -336,18 +334,18 @@ def main():
             current_pos = content_start
             part_num = 1
 
-            # ** NEW: Update the while loop condition **
-            while (current_pos + 15 <= content_end and 
+            while (current_pos + TARGET_CLIP_DURATION_SECONDS <= content_end and 
                    successful_uploads < MAX_SUCCESSFUL_CHUNKS_PER_VIDEO and 
                    consecutive_failures < MAX_CONSECUTIVE_FAILURES):
                 
                 if was_chunk_processed(db_conn, video_id, part_num):
-                    print(f"\n-- Skipping clip {part_num} (already processed in a previous run) --")
+                    print(f"\n-- Skipping clip {part_num} (already processed) --")
                     part_num += 1
-                    current_pos += 15
-                    continue # Move to the next iteration
+                    current_pos += TARGET_CLIP_DURATION_SECONDS
+                    continue
+                
                 start_time = current_pos
-                end_time = start_time + 15
+                end_time = start_time + TARGET_CLIP_DURATION_SECONDS
                 clip_filename = f"{video_id}_part_{part_num}"
                 print(f"\n-- Attempting clip {part_num} (Success: {successful_uploads}/{MAX_SUCCESSFUL_CHUNKS_PER_VIDEO} | Fails: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}) --")
 
@@ -358,43 +356,35 @@ def main():
                         'format': 'bestvideo[height<=1080][vcodec~=avc][ext=mp4]/bestvideo[height<=1080][ext=mp4]/bestvideo',
                         'outtmpl': output_template, 'quiet': True,
                         'download_ranges': yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
-                        'postprocessors': [{
-                            'key': 'FFmpegVideoConvertor',
-                            'preferedformat': 'mp4',
-                        }],
+                        'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}],
                     }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         ydl.download([video_url])
                     
                     local_filepath = Path(TEMP_VIDEO_DIR) / f"{clip_filename}.mp4"
                     if local_filepath.exists():
-                        # The function returns True on success
                         was_successful = process_and_upload_clip(local_filepath, db_conn, drive, video_id, part_num)
-                        
-                        # ** NEW: Reset or increment the failure counter **
                         if was_successful:
                             successful_uploads += 1
-                            consecutive_failures = 0 # RESET on success
+                            consecutive_failures = 0
                             log_chunk_status(db_conn, video_id, part_num, "PASSED")
                         else:
-                            consecutive_failures += 1 # INCREMENT on failure
+                            consecutive_failures += 1
                             log_chunk_status(db_conn, video_id, part_num, "FAILED")
                     else:
                         raise FileNotFoundError("Clip download did not produce an mp4 file.")
                 except Exception as e:
                     print(f"Could not process clip {part_num}. Reason: {e}")
-                    consecutive_failures += 1 # Also count download errors as failures
+                    consecutive_failures += 1
                     log_chunk_status(db_conn, video_id, part_num, "DOWNLOAD_ERROR")
+                
                 part_num += 1
-                current_pos += 15 # Move to the next 30-second segment
+                current_pos += TARGET_CLIP_DURATION_SECONDS
             
-             # ** NEW: Update parent status based on why the loop stopped **
-            if successful_uploads >= MAX_SUCCESSFUL_CHUNKS_PER_VIDEO or current_pos + 30 > content_end:
-                # If we achieved our goal or ran out of video, it's fully processed
+            if successful_uploads >= MAX_SUCCESSFUL_CHUNKS_PER_VIDEO or current_pos + TARGET_CLIP_DURATION_SECONDS > content_end:
                 print(f"\nFinished processing long video {video_id}. Found {successful_uploads} good clips. Marking as fully processed.")
                 update_parent_video_status(db_conn, video_id, "FULLY_PROCESSED")
             else:
-                # If we stopped due to failures, it's only partially processed and can be re-evaluated later
                 print(f"\nPaused processing long video {video_id} due to consecutive failures. Found {successful_uploads} good clips so far.")
                 update_parent_video_status(db_conn, video_id, "PARTIALLY_PROCESSED")
 
