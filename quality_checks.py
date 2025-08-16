@@ -40,9 +40,10 @@ def verify_video_file(video_path: str) -> bool:
         return False
 
 
-def check_for_hardcoded_subtitles(video_path: str, brightness_thresh=215, area_thresh=0.1554, frames_to_check=5) -> bool:
+# --- NEW AND IMPROVED SUBTITLE CHECK ---
+def check_for_hardcoded_subtitles(video_path: str, brightness_thresh=215, area_thresh=0.015, frames_to_check=5) -> bool:
     """
-    Checks for large, hardcoded subtitles in the video.
+    Checks for large, hardcoded subtitles in the TOP and BOTTOM thirds of the video.
     Returns True if the video is clean, False if subtitles are likely present.
     """
     print(f"  [QA Check] Analyzing for hardcoded subtitles...")
@@ -51,35 +52,42 @@ def check_for_hardcoded_subtitles(video_path: str, brightness_thresh=215, area_t
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames < frames_to_check: return True
 
-        # Check a few frames spread across the video
         frame_indices = np.linspace(0, total_frames - 1, frames_to_check, dtype=int)
-        
+
+        def _check_zone(zone_frame):
+            """Helper function to analyze a specific region of a frame."""
+            gray_zone = cv2.cvtColor(zone_frame, cv2.COLOR_BGR2GRAY)
+            _, threshold_zone = cv2.threshold(gray_zone, brightness_thresh, 255, cv2.THRESH_BINARY)
+            zone_area = threshold_zone.shape[0] * threshold_zone.shape[1]
+            if zone_area == 0: return False # Avoid division by zero
+            white_pixels = cv2.countNonZero(threshold_zone)
+            white_pixel_percentage = white_pixels / zone_area
+            return white_pixel_percentage > area_thresh, white_pixel_percentage
+
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
             if not ret: continue
 
-            # --- Analysis Zone ---
-            # Focus on the bottom 40% of the frame where subtitles usually are.
             h, w, _ = frame.shape
-            subtitle_zone_y_start = int(h * 0.60)
-            subtitle_zone = frame[subtitle_zone_y_start:, :]
             
-            # Convert to grayscale to focus on brightness
-            gray_zone = cv2.cvtColor(subtitle_zone, cv2.COLOR_BGR2GRAY)
+            # --- Define Top and Bottom Analysis Zones ---
+            top_zone_y_end = int(h * 0.33)
+            bottom_zone_y_start = int(h * 0.67)
+
+            top_zone = frame[0:top_zone_y_end, :]
+            bottom_zone = frame[bottom_zone_y_start:h, :]
             
-            # Apply a high threshold to isolate only very bright pixels (like text)
-            _, threshold_zone = cv2.threshold(gray_zone, brightness_thresh, 255, cv2.THRESH_BINARY)
+            # --- Check Both Zones ---
+            is_fail_top, top_ratio = _check_zone(top_zone)
+            if is_fail_top:
+                print(f"  [QA FAIL] Potential subtitles found in TOP zone. White pixel ratio: {top_ratio:.4f}")
+                cap.release()
+                return False
             
-            # --- Detection Logic ---
-            # Calculate the percentage of white pixels in the zone
-            zone_area = threshold_zone.shape[0] * threshold_zone.shape[1]
-            white_pixels = cv2.countNonZero(threshold_zone)
-            white_pixel_percentage = white_pixels / zone_area
-            
-            # If the percentage of bright pixels is too high, it's likely text
-            if white_pixel_percentage > area_thresh:
-                print(f"  [QA FAIL] Potential subtitles found. White pixel ratio: {white_pixel_percentage:.4f}")
+            is_fail_bottom, bottom_ratio = _check_zone(bottom_zone)
+            if is_fail_bottom:
+                print(f"  [QA FAIL] Potential subtitles found in BOTTOM zone. White pixel ratio: {bottom_ratio:.4f}")
                 cap.release()
                 return False
 

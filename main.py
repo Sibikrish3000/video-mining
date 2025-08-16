@@ -253,9 +253,9 @@ def main():
 
     # --- Level 1: Search & Metadata Filtering (Unchanged) ---
     print("\n--- Level 1: Searching YouTube & Filtering Metadata ---")
-    queries = ["swimming sports -edit -vlog", "diving sports -compilation", "kayak roll sports -fail", "water polo sports","water dive sports"]
-    bad_keywords = ['edit', 'vlog', 'cinematic', 'fire edit', 'compilation', 'fails', 'music video']
-    
+    queries = ["how to use face wash correctly #shorts -review -skit","shampoo application demo #shorts -routine -vlog","lotion application step-by-step #shorts -GRWM","conditioner usage demonstration #shorts -tutorial","how to apply roll-on deodorant #shorts","toothpaste demonstration on brush #shorts","using a soap bar #shorts -asmr -cutting","hand wash proper technique #shorts"]
+    bad_keywords = ["-skit", "-comedy", "-review", "-unboxing", "-ad"]
+
     # ... (This whole search and metadata filter block is identical to the previous version)
     candidate_ids = set()
     for query in queries:
