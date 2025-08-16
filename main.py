@@ -41,6 +41,12 @@ SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googl
 
 
 QA_MIN_PERSON_AREA=0.05
+# 0.015 was too sensitive. 0.03 (3% of the zone) is a better starting point.
+QA_SUBTITLE_AREA_THRESHOLD = 0.03
+
+# If True, saves a snapshot of frames that fail the subtitle check for review.
+DEBUG_SAVE_FAILED_SUBTITLE_FRAMES = True
+DEBUG_FRAME_DIR = "debug_frames"
 
 TARGET_SIZE_MB = 5
 # A small buffer to ensure the final file is under the target size.
@@ -142,7 +148,9 @@ def process_and_upload_clip(local_filepath: Path, db_conn, drive_service, video_
         print(f"REJECTED CLIP: File is corrupted or unplayable.")
         return False
 
-    if not quality_checks.check_for_hardcoded_subtitles(str(processed_filepath)):
+    if not quality_checks.check_for_hardcoded_subtitles(area_thresh=QA_SUBTITLE_AREA_THRESHOLD,
+        debug_save=DEBUG_SAVE_FAILED_SUBTITLE_FRAMES,
+        debug_dir=DEBUG_FRAME_DIR):
         print(f"REJECTED CLIP: Failed hardcoded subtitle check.")
         return False
         
@@ -247,6 +255,8 @@ def main():
     if os.path.exists(TEMP_VIDEO_DIR):
         shutil.rmtree(TEMP_VIDEO_DIR)
     os.makedirs(TEMP_VIDEO_DIR)
+    if DEBUG_SAVE_FAILED_SUBTITLE_FRAMES and not os.path.exists(DEBUG_FRAME_DIR):
+        os.makedirs(DEBUG_FRAME_DIR)
     
     db_conn = setup_database()
     youtube, drive = get_google_services()

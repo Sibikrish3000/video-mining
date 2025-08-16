@@ -40,13 +40,18 @@ def verify_video_file(video_path: str) -> bool:
         return False
 
 
-# --- NEW AND IMPROVED SUBTITLE CHECK ---
-def check_for_hardcoded_subtitles(video_path: str, brightness_thresh=215, area_thresh=0.015, frames_to_check=5) -> bool:
+def check_for_hardcoded_subtitles(
+    video_path: str,
+    brightness_thresh=215,
+    area_thresh=0.015,
+    frames_to_check=5,
+    debug_save=False,
+    debug_dir="debug_frames"
+) -> bool:
     """
-    Checks for large, hardcoded subtitles in the TOP and BOTTOM thirds of the video.
-    Returns True if the video is clean, False if subtitles are likely present.
+    Checks for hardcoded subtitles and saves a debug image on failure if requested.
     """
-    print(f"  [QA Check] Analyzing for hardcoded subtitles...")
+    print(f"  [QA Check] Analyzing for subtitles (Threshold: {area_thresh*100:.2f}%)...")
     try:
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -59,10 +64,10 @@ def check_for_hardcoded_subtitles(video_path: str, brightness_thresh=215, area_t
             gray_zone = cv2.cvtColor(zone_frame, cv2.COLOR_BGR2GRAY)
             _, threshold_zone = cv2.threshold(gray_zone, brightness_thresh, 255, cv2.THRESH_BINARY)
             zone_area = threshold_zone.shape[0] * threshold_zone.shape[1]
-            if zone_area == 0: return False # Avoid division by zero
+            if zone_area == 0: return False, 0.0, None
             white_pixels = cv2.countNonZero(threshold_zone)
             white_pixel_percentage = white_pixels / zone_area
-            return white_pixel_percentage > area_thresh, white_pixel_percentage
+            return white_pixel_percentage > area_thresh, white_pixel_percentage, threshold_zone
 
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -70,24 +75,34 @@ def check_for_hardcoded_subtitles(video_path: str, brightness_thresh=215, area_t
             if not ret: continue
 
             h, w, _ = frame.shape
-            
-            # --- Define Top and Bottom Analysis Zones ---
             top_zone_y_end = int(h * 0.33)
             bottom_zone_y_start = int(h * 0.67)
-
             top_zone = frame[0:top_zone_y_end, :]
             bottom_zone = frame[bottom_zone_y_start:h, :]
             
-            # --- Check Both Zones ---
-            is_fail_top, top_ratio = _check_zone(top_zone)
+            is_fail_top, top_ratio, top_thresh_img = _check_zone(top_zone)
             if is_fail_top:
                 print(f"  [QA FAIL] Potential subtitles found in TOP zone. White pixel ratio: {top_ratio:.4f}")
+                if debug_save:
+                    # Save the original frame and the thresholded image for analysis
+                    debug_filename = f"{Path(video_path).stem}_FAIL_TOP_RATIO_{top_ratio:.4f}.jpg"
+                    debug_filepath = Path(debug_dir) / debug_filename
+                    # Concatenate original and debug view for easy comparison
+                    combined_img = np.concatenate((top_zone, cv2.cvtColor(top_thresh_img, cv2.COLOR_GRAY2BGR)), axis=1)
+                    cv2.imwrite(str(debug_filepath), combined_img)
+                    print(f"  [Debug] Saved failure analysis frame to: {debug_filepath}")
                 cap.release()
                 return False
             
-            is_fail_bottom, bottom_ratio = _check_zone(bottom_zone)
+            is_fail_bottom, bottom_ratio, bottom_thresh_img = _check_zone(bottom_zone)
             if is_fail_bottom:
                 print(f"  [QA FAIL] Potential subtitles found in BOTTOM zone. White pixel ratio: {bottom_ratio:.4f}")
+                if debug_save:
+                    debug_filename = f"{Path(video_path).stem}_FAIL_BOTTOM_RATIO_{bottom_ratio:.4f}.jpg"
+                    debug_filepath = Path(debug_dir) / debug_filename
+                    combined_img = np.concatenate((bottom_zone, cv2.cvtColor(bottom_thresh_img, cv2.COLOR_GRAY2BGR)), axis=1)
+                    cv2.imwrite(str(debug_filepath), combined_img)
+                    print(f"  [Debug] Saved failure analysis frame to: {debug_filepath}")
                 cap.release()
                 return False
 
