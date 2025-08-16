@@ -148,7 +148,7 @@ def process_and_upload_clip(local_filepath: Path, db_conn, drive_service, video_
         print(f"REJECTED CLIP: File is corrupted or unplayable.")
         return False
 
-    if not quality_checks.check_for_hardcoded_subtitles(area_thresh=QA_SUBTITLE_AREA_THRESHOLD,
+    if not quality_checks.check_for_hardcoded_subtitles(video_path=str(processed_filepath), area_thresh=QA_SUBTITLE_AREA_THRESHOLD,
         debug_save=DEBUG_SAVE_FAILED_SUBTITLE_FRAMES,
         debug_dir=DEBUG_FRAME_DIR):
         print(f"REJECTED CLIP: Failed hardcoded subtitle check.")
