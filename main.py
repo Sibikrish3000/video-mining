@@ -43,9 +43,14 @@ SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googl
 QA_MIN_PERSON_AREA=0.05
 # 0.015 was too sensitive. 0.03 (3% of the zone) is a better starting point.
 QA_SUBTITLE_AREA_THRESHOLD = 0.03
-
+QA_BRIGHTNESS_AREA_THRESHOLD = 0.04
 # If True, saves a snapshot of frames that fail the subtitle check for review.
 DEBUG_SAVE_FAILED_SUBTITLE_FRAMES = True
+
+QA_OCR_WORD_THRESHOLD = 3
+QA_OCR_FRAMES_TO_CHECK = 5
+DEBUG_SAVE_FAILED_OCR_FRAMES = True
+
 DEBUG_FRAME_DIR = "debug_frames"
 # Change this value to 15, 30, or any other duration you need.
 TARGET_CLIP_DURATION_SECONDS = 30
@@ -150,12 +155,27 @@ def process_and_upload_clip(local_filepath: Path, db_conn, drive_service, video_
     if not quality_checks.verify_video_file(str(processed_filepath)):
         print(f"REJECTED CLIP: File is corrupted or unplayable.")
         return False
+    
 
-    if not quality_checks.check_for_hardcoded_subtitles(video_path=str(processed_filepath), area_thresh=QA_SUBTITLE_AREA_THRESHOLD,
-        debug_save=DEBUG_SAVE_FAILED_SUBTITLE_FRAMES,
-        debug_dir=DEBUG_FRAME_DIR):
-        print(f"REJECTED CLIP: Failed hardcoded subtitle check.")
+    if not quality_checks.check_for_text_hybrid_final(
+        str(processed_filepath),
+        ocr_word_threshold=QA_OCR_WORD_THRESHOLD,
+        frames_to_check=QA_OCR_FRAMES_TO_CHECK,
+        debug_save=DEBUG_SAVE_FAILED_OCR_FRAMES,
+        debug_dir=DEBUG_FRAME_DIR
+    ):
+        print(f"REJECTED CLIP: Failed hybrid text check.")
         return False
+
+    # if not quality_checks.check_for_text_with_ocr(
+    #     str(processed_filepath),
+    #     word_threshold=QA_OCR_WORD_THRESHOLD,
+    #     debug_save=DEBUG_SAVE_FAILED_OCR_FRAMES,
+    #     debug_dir=DEBUG_FRAME_DIR
+    # ):
+    #     print(f"REJECTED CLIP: Failed OCR text check.")
+    #     return False
+   
         
     if not quality_checks.check_scene_cuts(str(processed_filepath)):
         print(f"REJECTED CLIP: Failed scene cut check.")

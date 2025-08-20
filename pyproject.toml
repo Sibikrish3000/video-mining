@@ -1,17 +1,30 @@
 [project]
 name = "video-mining"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "A high-performance video data mining and QA pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "dotenv>=0.9.9",
-    "google-api-python-client>=2.178.0",
-    "google-auth-httplib2>=0.2.0",
-    "google-auth-oauthlib>=1.2.2",
-    "isodate>=0.7.2",
-    "numpy>=2.3.2",
-    "opencv-python>=4.11.0.86",
-    "ultralytics>=8.3.176",
-    "yt-dlp>=2025.8.11",
+    # Core Utilities
+    "python-dotenv",
+    "isodate",
+    "setuptools",
+    # Pin NumPy to the stable 1.x series for compatibility with Torch/OpenCV
+    "numpy<2.0",
+
+    # YouTube and Google Drive APIs
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    "yt-dlp",
+
+    # --- Final AI & CV Dependencies ---
+    # Pinning opencv-python is the key to stability.
+    "opencv-python==4.9.0.80",
+    # The library for YOLOv8 subject detection.
+    "ultralytics",
+    # The most accurate OCR library for this task.
+    "easyocr",
+    # A dependency for EasyOCR.
+    "torchvision",
 ]

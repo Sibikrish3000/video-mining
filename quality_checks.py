@@ -1,12 +1,14 @@
-# quality_checks.py
-
 from pathlib import Path
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import easyocr
 
-# Load the YOLO model once to be reused.
-# It will be downloaded automatically on the first run.
+OCR_READER_CJK = None
+OCR_READER_DEVANAGARI = None
+OCR_READER = None
+
+
 try:
     YOLO_MODEL = YOLO('yolov8n.pt')
     print("AI Model (YOLOv8) loaded successfully.")
@@ -14,8 +16,13 @@ except Exception as e:
     YOLO_MODEL = None
     print(f"CRITICAL: Failed to load YOLO model. Subject clarity check will be disabled. Error: {e}")
 
+try:
+    OCR_READER = easyocr.Reader(["en"])
+    print("  - English OCR Reader loaded successfully.")
+except Exception as e:
+    OCR_READER = None
+    print(f"  - CRITICAL: Failed to load EasyOCR model. Subtitle check will be disabled. Error: {e}")
 
-# --- NEW VERIFICATION FUNCTION ---
 def verify_video_file(video_path: str) -> bool:
     """
     Quickly checks if a video file is valid and playable by trying to open it and read a frame.
@@ -41,18 +48,23 @@ def verify_video_file(video_path: str) -> bool:
         return False
 
 
-def check_for_hardcoded_subtitles(
+
+def check_for_text_ocr_multi_zone(
     video_path: str,
-    brightness_thresh=215,
-    area_thresh=0.015,
-    frames_to_check=5,
-    debug_save=False,
-    debug_dir="debug_frames"
+    word_threshold: int = 2,
+    frames_to_check: int = 3,
+    debug_save: bool = True,
+    debug_dir: str = "debug_frames"
 ) -> bool:
     """
-    Checks for hardcoded subtitles and saves a debug image on failure if requested.
+    Uses OCR to detect significant text in the TOP, CENTER, and BOTTOM zones of the video.
+    This method is color and brightness independent.
     """
-    print(f"  [QA Check] Analyzing for subtitles (Threshold: {area_thresh*100:.2f}%)...")
+    if not OCR_READER:
+        print("  [QA Check] Skipping text check: OCR models failed to load.")
+        return True
+
+    print(f"  [QA Check] Analyzing for text with OCR in all zones (Threshold: >{word_threshold} words)...")
     try:
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -60,15 +72,88 @@ def check_for_hardcoded_subtitles(
 
         frame_indices = np.linspace(0, total_frames - 1, frames_to_check, dtype=int)
 
-        def _check_zone(zone_frame):
-            """Helper function to analyze a specific region of a frame."""
-            gray_zone = cv2.cvtColor(zone_frame, cv2.COLOR_BGR2GRAY)
-            _, threshold_zone = cv2.threshold(gray_zone, brightness_thresh, 255, cv2.THRESH_BINARY)
-            zone_area = threshold_zone.shape[0] * threshold_zone.shape[1]
-            if zone_area == 0: return False, 0.0, None
-            white_pixels = cv2.countNonZero(threshold_zone)
-            white_pixel_percentage = white_pixels / zone_area
-            return white_pixel_percentage > area_thresh, white_pixel_percentage, threshold_zone
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret: continue
+
+            h, w, _ = frame.shape
+            
+            # --- Define Top, Center, and Bottom Analysis Zones ---
+            top_zone = frame[0:int(h*0.30), :]
+            center_zone = frame[int(h*0.30):int(h*0.70), :]
+            bottom_zone = frame[int(h*0.70):h, :]
+            
+            zones = {
+                "TOP": {"frame": top_zone, "offset": 0},
+                "CENTER": {"frame": center_zone, "offset": int(h*0.30)},
+                "BOTTOM": {"frame": bottom_zone, "offset": int(h*0.70)}
+            }
+            
+            for zone_name, zone_data in zones.items():
+                # Run both OCR readers on the zone
+                ocr_results = OCR_READER.readtext(zone_data["frame"])
+
+                if len(ocr_results) >= word_threshold:
+                    detected_text = " ".join([res[1] for res in ocr_results])
+                    print(f"  [QA FAIL] Excessive text found in {zone_name} zone. Text: '{detected_text}'")
+                    
+                    if debug_save:
+                        # Draw boxes on the original full frame for context
+                        for (bbox, text, prob) in ocr_results:
+                            (tl, tr, br, bl) = bbox
+                            # Add the zone's y-offset to draw the box in the correct position
+                            offset = zone_data["offset"]
+                            tl = (int(tl[0]), int(tl[1]) + offset)
+                            br = (int(br[0]), int(br[1]) + offset)
+                            cv2.rectangle(frame, tl, br, (0, 0, 255), 3)
+                        
+                        debug_filename = f"{Path(video_path).stem}_FAIL_OCR_{zone_name}.jpg"
+                        debug_filepath = Path(debug_dir) / debug_filename
+                        cv2.imwrite(str(debug_filepath), frame)
+                        print(f"  [Debug] Saved OCR failure analysis frame to: {debug_filepath}")
+
+                    cap.release()
+                    return False
+
+        print("  [QA PASS] No significant text detected in any zone.")
+        cap.release()
+        return True
+    except Exception as e:
+        print(f"  [QA ERROR] OCR check failed: {e}. Passing by default.")
+        return True
+    
+def check_for_text_final(
+    video_path: str,
+    word_threshold: int = 2, # Tuned to be slightly more lenient
+    frames_to_check: int = 5,
+    debug_save: bool = True,
+    debug_dir: str = "debug_frames"
+) -> bool:
+    """
+    Uses advanced image pre-processing (CLAHE) before running multi-lingual OCR
+    on the top, center, and bottom zones of video frames for maximum accuracy.
+    """
+    if not OCR_READER:
+        print("  [QA Check] Skipping text check: OCR model not loaded.")
+        return True
+
+    print(f"  [QA Check] Analyzing for text with Pre-Processing + OCR (Threshold: >{word_threshold} words)...")
+    try:
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < frames_to_check: return True
+
+        frame_indices = np.linspace(0, total_frames - 1, frames_to_check, dtype=int)
+
+        def _preprocess_for_ocr(frame_zone):
+            """Applies Grayscale and CLAHE to enhance text for OCR."""
+            # 1. Convert to grayscale
+            gray = cv2.cvtColor(frame_zone, cv2.COLOR_BGR2GRAY)
+            # 2. Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced_gray = clahe.apply(gray)
+            return enhanced_gray
 
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -76,43 +161,45 @@ def check_for_hardcoded_subtitles(
             if not ret: continue
 
             h, w, _ = frame.shape
-            top_zone_y_end = int(h * 0.33)
-            bottom_zone_y_start = int(h * 0.67)
-            top_zone = frame[0:top_zone_y_end, :]
-            bottom_zone = frame[bottom_zone_y_start:h, :]
+            zones = {
+                "TOP": {"frame": frame[0:int(h*0.33), :], "offset": 0},
+                "CENTER": {"frame": frame[int(h*0.33):int(h*0.67), :], "offset": int(h*0.33)},
+                "BOTTOM": {"frame": frame[int(h*0.67):h, :], "offset": int(h*0.67)}
+            }
             
-            is_fail_top, top_ratio, top_thresh_img = _check_zone(top_zone)
-            if is_fail_top:
-                print(f"  [QA FAIL] Potential subtitles found in TOP zone. White pixel ratio: {top_ratio:.4f}")
-                if debug_save:
-                    # Save the original frame and the thresholded image for analysis
-                    debug_filename = f"{Path(video_path).stem}_FAIL_TOP_RATIO_{top_ratio:.4f}.jpg"
-                    debug_filepath = Path(debug_dir) / debug_filename
-                    # Concatenate original and debug view for easy comparison
-                    combined_img = np.concatenate((top_zone, cv2.cvtColor(top_thresh_img, cv2.COLOR_GRAY2BGR)), axis=1)
-                    cv2.imwrite(str(debug_filepath), combined_img)
-                    print(f"  [Debug] Saved failure analysis frame to: {debug_filepath}")
-                cap.release()
-                return False
-            
-            is_fail_bottom, bottom_ratio, bottom_thresh_img = _check_zone(bottom_zone)
-            if is_fail_bottom:
-                print(f"  [QA FAIL] Potential subtitles found in BOTTOM zone. White pixel ratio: {bottom_ratio:.4f}")
-                if debug_save:
-                    debug_filename = f"{Path(video_path).stem}_FAIL_BOTTOM_RATIO_{bottom_ratio:.4f}.jpg"
-                    debug_filepath = Path(debug_dir) / debug_filename
-                    combined_img = np.concatenate((bottom_zone, cv2.cvtColor(bottom_thresh_img, cv2.COLOR_GRAY2BGR)), axis=1)
-                    cv2.imwrite(str(debug_filepath), combined_img)
-                    print(f"  [Debug] Saved failure analysis frame to: {debug_filepath}")
-                cap.release()
-                return False
+            for zone_name, zone_data in zones.items():
+                # Pre-process the zone to make text clearer
+                processed_zone = _preprocess_for_ocr(zone_data["frame"])
+                
+                # Run OCR on the enhanced image
+                ocr_results = OCR_READER.readtext(processed_zone)
 
-        print("  [QA PASS] No significant hardcoded subtitles detected.")
+                if len(ocr_results) >= word_threshold:
+                    detected_text = " ".join([res[1] for res in ocr_results])
+                    print(f"  [QA FAIL] Excessive text found in {zone_name} zone. Text: '{detected_text}'")
+                    
+                    if debug_save:
+                        for (bbox, text, prob) in ocr_results:
+                            offset = zone_data["offset"]
+                            tl = (int(bbox[0][0]), int(bbox[0][1]) + offset)
+                            br = (int(bbox[2][0]), int(bbox[2][1]) + offset)
+                            cv2.rectangle(frame, tl, br, (0, 0, 255), 3)
+                        
+                        debug_filename = f"{Path(video_path).stem}_FAIL_FINAL_OCR_{zone_name}.jpg"
+                        debug_filepath = Path(debug_dir) / debug_filename
+                        cv2.imwrite(str(debug_filepath), frame)
+                        print(f"  [Debug] Saved OCR failure analysis frame to: {debug_filepath}")
+
+                    cap.release()
+                    return False
+
+        print("  [QA PASS] No significant text detected in any zone.")
         cap.release()
         return True
     except Exception as e:
-        print(f"  [QA ERROR] Subtitle check failed: {e}. Passing by default.")
+        print(f"  [QA ERROR] Final OCR check failed: {e}. Passing by default.")
         return True
+
 def check_scene_cuts(video_path: str, cut_threshold: float = 2.5) -> bool:
     """
     Analyzes video for rapid scene changes.
@@ -197,3 +284,108 @@ def check_subject_clarity(video_path: str, min_person_area: float = 0.05, frames
     except Exception as e:
         print(f"  [QA ERROR] Subject clarity check failed: {e}. Passing by default.")
         return True
+def check_for_text_hybrid_final(
+    video_path: str,
+    shape_contour_threshold: int = 15,     # Threshold for the FAST shape detector
+    ocr_word_threshold: int = 2,           # Threshold for the SMART OCR confirmation
+    frames_to_check: int = 5,
+    debug_save: bool = False,
+    debug_dir: str = "debug_frames"
+) -> bool:
+    """
+    Uses a fast, shape-based text region detector as a pre-screener, then runs
+    accurate OCR only on suspicious frames for the most robust detection.
+    """
+    if not OCR_READER:
+        print("  [QA Check] Skipping text check: OCR models not loaded.")
+        return True
+
+    print(f"  [QA Check] Analyzing for text with Shape Detection + OCR...")
+    try:
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < frames_to_check: return True
+
+        frame_indices = np.linspace(0, total_frames - 1, frames_to_check, dtype=int)
+
+        def _check_zone_for_shapes(zone_frame):
+            """Stage 1: Fast, shape-based text region detection."""
+            # Pre-processing for contour detection
+            gray = cv2.cvtColor(zone_frame, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edged = cv2.Canny(blurred, 30, 150)
+            
+            # Find contours (outlines of shapes)
+            contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            text_like_contours = 0
+            for c in contours:
+                # Get the bounding box of the contour
+                (x, y, w, h) = cv2.boundingRect(c)
+                
+                # Filter based on geometric properties of letters
+                # Letters are usually not too wide or too tall, and have a minimum size
+                aspect_ratio = w / float(h)
+                if (h > 8 and w > 3) and (h < 100 and w < 100) and (aspect_ratio < 3.0 and aspect_ratio > 0.1):
+                    text_like_contours += 1
+            
+            return text_like_contours > shape_contour_threshold
+
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret: continue
+
+            h, w, _ = frame.shape
+            zones = {
+                "TOP": {"frame": frame[0:int(h*0.33), :], "offset": 0},
+                "CENTER": {"frame": frame[int(h*0.33):int(h*0.67), :], "offset": int(h*0.33)},
+                "BOTTOM": {"frame": frame[int(h*0.67):h, :], "offset": int(h*0.67)}
+            }
+            
+            for zone_name, zone_data in zones.items():
+                # --- STAGE 1: Check for text-like shapes ---
+                is_suspicious = _check_zone_for_shapes(zone_data["frame"])
+                
+                if is_suspicious:
+                    print(f"  - Suspicious shapes found in {zone_name} zone. Running OCR for confirmation...")
+                    # --- STAGE 2: Confirm with OCR ---
+                    ocr_results = OCR_READER.readtext(zone_data["frame"])
+
+                    print(f"  - OCR found {len(ocr_results)} {ocr_word_threshold} words in {zone_name} zone.")
+                    if len(ocr_results) >= ocr_word_threshold:
+                        detected_text = " ".join([res[1] for res in ocr_results])
+                        print(f"  [QA FAIL] OCR confirmed excessive text in {zone_name} zone. Text: '{detected_text}'")
+                        
+                        if debug_save:
+                            # Debug drawing logic remains the same
+                            for (bbox, text, prob) in ocr_results:
+                                offset = zone_data["offset"]
+                                tl = (int(bbox[0][0]), int(bbox[0][1]) + offset)
+                                br = (int(bbox[2][0]), int(bbox[2][1]) + offset)
+                                cv2.rectangle(frame, tl, br, (0, 0, 255), 3)
+                            
+                            debug_filename = f"{Path(video_path).stem}_FAIL_HYBRID_OCR_{zone_name}.jpg"
+                            debug_filepath = Path(debug_dir) / debug_filename
+                            cv2.imwrite(str(debug_filepath), frame)
+                            print(f"  [Debug] Saved failure analysis frame to: {debug_filepath}")
+
+                        cap.release()
+                        return False
+
+        print("  [QA PASS] No significant text detected in any zone.")
+        cap.release()
+        return True
+    except Exception as e:
+        print(f"  [QA ERROR] Hybrid OCR check failed: {e}. Passing by default.")
+        return True
+    
+if __name__ == "__main__":
+    video_path = "temp_videos/video1.mp4"
+
+    result = check_for_text_ocr_multi_zone(video_path)
+    print(f"Text OCR multi-zone check result: {result}")
+    result = check_for_text_final(video_path)
+    print(f"Text final check result: {result}")
+    result = check_for_text_hybrid_final(video_path)
+    print(f"Text hybrid final check result: {result}")
